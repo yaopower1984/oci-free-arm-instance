@@ -2,7 +2,7 @@ name: Try to Create OCI VM
 # Runs every 10 minutes
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/10 * * * *"
   workflow_dispatch:
 
 env:
@@ -61,20 +61,20 @@ jobs:
           echo "region=${{ env.OCI_CLI_REGION }}" >> /home/runner/.oci/config
           
           # Write SSH Key
-          echo "${{ secrets.SSH_PUBLIC_KEY }}" > /home/runner/my_ssh_key.pub
+          echo "${{ secrets.SSH_PUBLIC_KEY }}" > /tmp/ssh_key.pub
 
-          # Launch VM (100GB Boot Volume to avoid Quota Limits)
-          OCI_OUTPUT=$(oci compute instance launch \
+          # Launch VM
+          oci compute instance launch \
             --compartment-id "$COMPARTMENT_ID" \
             --availability-domain "$AD_NAME" \
             --shape "VM.Standard.A1.Flex" \
             --shape-config '{"ocpus":4,"memoryInGBs":24}' \
             --subnet-id "$SUBNET_ID" \
             --image-id "$IMAGE_ID" \
-            --ssh-authorized-keys-file "/home/runner/my_ssh_key.pub" \
+            --ssh-authorized-keys-file "/tmp/ssh_key.pub" \
             --assign-public-ip true \
             --display-name "coolify-vm" \
-            --boot-volume-size-in-gbs 100 2>&1 || true)
+            --boot-volume-size-in-gbs 100
 
           # Store Log for Discord
           echo "log_data<<EOF" >> $GITHUB_OUTPUT
