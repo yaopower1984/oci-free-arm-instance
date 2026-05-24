@@ -10,8 +10,8 @@ env:
   SUPPRESS_LABEL_WARNING: true
 
   # 2. Mumbai Configuration (Verified)
-  OCI_CLI_REGION: "ap-mumbai-1"
-  AD_NAME: "qaqb:AP-MUMBAI-1-AD-1"
+  OCI_CLI_REGION: "us-phoenix-1"
+  AD_NAME: "qaqb:US-PHOENIX-1-AD-3"
   IMAGE_ID: "ocid1.image.oc1.ap-mumbai-1.aaaaaaaahzcec4tjbvlvkptojwrc5zo4zazgdnwwyg5f5ayjpkreigtzwpxa"
   SUBNET_ID: "ocid1.subnet.oc1.ap-mumbai-1.aaaaaaaal7czmysz7hqztjcrt72oaoipcqo6rin4w5bvq64vfrxbjtw7nx4q"
 
