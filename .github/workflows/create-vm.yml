@@ -8,6 +8,7 @@ on:
 env:
   # 1. Suppress warnings to keep logs clean
   SUPPRESS_LABEL_WARNING: true
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
   # 2. Mumbai Configuration (Verified)
   OCI_CLI_REGION: "us-phoenix-1"
