@@ -1,0 +1,112 @@
+name: Try to Create OCI VM
+# Runs every 5 minutes
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+env:
+  # 1. Suppress warnings to keep logs clean
+  SUPPRESS_LABEL_WARNING: true
+
+  # 2. Mumbai Configuration (Verified)
+  OCI_CLI_REGION: "ap-mumbai-1"
+  AD_NAME: "qaqb:AP-MUMBAI-1-AD-1"
+  IMAGE_ID: "ocid1.image.oc1.ap-mumbai-1.aaaaaaaahzcec4tjbvlvkptojwrc5zo4zazgdnwwyg5f5ayjpkreigtzwpxa"
+  SUBNET_ID: "ocid1.subnet.oc1.ap-mumbai-1.aaaaaaaal7czmysz7hqztjcrt72oaoipcqo6rin4w5bvq64vfrxbjtw7nx4q"
+
+  # 3. Secrets
+  COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
+  OCI_CLI_USER: ${{ secrets.OCI_CLI_USER }}
+  OCI_CLI_TENANCY: ${{ secrets.OCI_CLI_TENANCY }}
+  OCI_CLI_FINGERPRINT: ${{ secrets.OCI_CLI_FINGERPRINT }}
+  OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CLI_KEY_CONTENT }}
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cache pip packages
+        id: cache-pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.local
+          key: ${{ runner.os }}-pip-oci-cli-v1
+
+      - name: Add OCI CLI to path
+        run: echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Setup OCI CLI and Try to Create VM
+        id: create_vm
+        continue-on-error: true 
+        run: |
+          set -o pipefail
+
+          # Install OCI CLI
+          pip install oci-cli
+
+          # Create Directory
+          mkdir -p /home/runner/.oci
+
+          # Write Key File
+          echo "${{ secrets.OCI_CLI_KEY_CONTENT }}" > /home/runner/.oci/oci_api_key.pem
+          chmod 600 /home/runner/.oci/oci_api_key.pem
+
+          # Write Config File (Absolute Paths)
+          echo "[DEFAULT]" > /home/runner/.oci/config
+          echo "user=${{ secrets.OCI_CLI_USER }}" >> /home/runner/.oci/config
+          echo "tenancy=${{ secrets.OCI_CLI_TENANCY }}" >> /home/runner/.oci/config
+          echo "fingerprint=${{ secrets.OCI_CLI_FINGERPRINT }}" >> /home/runner/.oci/config
+          echo "key_file=/home/runner/.oci/oci_api_key.pem" >> /home/runner/.oci/config
+          echo "region=${{ env.OCI_CLI_REGION }}" >> /home/runner/.oci/config
+          
+          # Write SSH Key
+          echo "${{ secrets.SSH_PUBLIC_KEY }}" > /home/runner/my_ssh_key.pub
+
+          # Launch VM (50GB Boot Volume to avoid Quota Limits)
+          OCI_OUTPUT=$(oci compute instance launch \
+            --compartment-id "$COMPARTMENT_ID" \
+            --availability-domain "$AD_NAME" \
+            --shape "VM.Standard.A1.Flex" \
+            --shape-config '{"ocpus":2,"memoryInGBs":12}' \
+            --subnet-id "$SUBNET_ID" \
+            --image-id "$IMAGE_ID" \
+            --ssh-authorized-keys-file "/home/runner/my_ssh_key.pub" \
+            --assign-public-ip true \
+            --display-name "coolify-vm" \
+            --boot-volume-size-in-gbs 50 2>&1 || true)
+
+          # Store Log for Discord
+          echo "log_data<<EOF" >> $GITHUB_OUTPUT
+          echo "$OCI_OUTPUT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          # --- SMART CHECK LOGIC ---
+          if echo "$OCI_OUTPUT" | grep -q '"lifecycle-state": "PROVISIONING"'; then
+            echo "✅ VICTORY! VM is being created."
+            exit 0
+          elif echo "$OCI_OUTPUT" | grep -q 'Out of host capacity'; then
+            echo "⚠️  Oracle is full (Capacity Error). This is expected. Retrying next time..."
+            # We exit with 0 so GitHub does not disable the cron schedule
+            exit 0
+          else
+            echo "❌ Real Error Detected. Failing the workflow."
+            exit 1
+          fi
+
+      - name: Send Discord Notification
+        if: always()
+        uses: sarisia/actions-status-discord@v1.15.4
+        with:
+          webhook: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # Set color: Green for Success, Orange for Capacity Wait, Red for Error
+          color: ${{ steps.create_vm.outcome == 'success' && '0x28a745' || '0xdc3545' }}
+          title: "OCI Bot Status"
+          description: |
+            **Result:**
+            ${{ contains(steps.create_vm.outputs.log_data, 'Out of host capacity') && '⏳ Waiting for Capacity...' || contains(steps.create_vm.outputs.log_data, 'PROVISIONING') && '🚀 VM CREATED! DISABLE WORKFLOW!' || '❌ Error' }}
+
+            **Details:**
+            ```json
+            ${{ steps.create_vm.outputs.log_data }}
+            ```
