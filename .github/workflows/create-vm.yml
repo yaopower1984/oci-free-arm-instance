@@ -12,8 +12,8 @@ env:
   # 2. Mumbai Configuration (Verified)
   OCI_CLI_REGION: "us-phoenix-1"
   AD_NAME: "qaqb:US-PHOENIX-1-AD-3"
-  IMAGE_ID: "ocid1.image.oc1.ap-mumbai-1.aaaaaaaahzcec4tjbvlvkptojwrc5zo4zazgdnwwyg5f5ayjpkreigtzwpxa"
-  SUBNET_ID: "ocid1.subnet.oc1.ap-mumbai-1.aaaaaaaal7czmysz7hqztjcrt72oaoipcqo6rin4w5bvq64vfrxbjtw7nx4q"
+  IMAGE_ID: "ocid1.image.oc1.phx.aaaaaaaarmcelmbnwximabxo7qvea5cv56bjfa3jnpmgvsfpkeq2e6w4w4ta"
+  SUBNET_ID: "ocid1.subnet.oc1.phx.aaaaaaaafqectyateqrfoe2kc7fm3yn4hn4crnyjwxpxhwrqb46az6vg7ota"
 
   # 3. Secrets
   COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
