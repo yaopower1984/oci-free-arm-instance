@@ -11,7 +11,7 @@ env:
 
   # 2. Mumbai Configuration (Verified)
   OCI_CLI_REGION: "us-phoenix-1"
-  AD_NAME: "qaqb:US-PHOENIX-1-AD-3"
+  AD_NAME: "ULyM:PHX-AD-3"
   IMAGE_ID: "ocid1.image.oc1.phx.aaaaaaaarmcelmbnwximabxo7qvea5cv56bjfa3jnpmgvsfpkeq2e6w4w4ta"
   SUBNET_ID: "ocid1.subnet.oc1.phx.aaaaaaaafqectyateqrfoe2kc7fm3yn4hn4crnyjwxpxhwrqb46az6vg7ota"
 
