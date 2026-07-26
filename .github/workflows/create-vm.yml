@@ -29,15 +29,10 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - name: Cache pip packages
-        id: cache-pip
-        uses: actions/cache@v4
+      - name: Set up isolated Python for OCI CLI
+        uses: actions/setup-python@v6
         with:
-          path: ~/.local
-          key: ${{ runner.os }}-pip-oci-cli-v1
-
-      - name: Add OCI CLI to path
-        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          python-version: "3.11"
 
       - name: Setup OCI CLI and try to create VM
         id: create_vm
@@ -116,7 +111,15 @@ jobs:
             exit 1
           fi
 
-          python -m pip install --user oci-cli
+          OCI_VENV="$RUNNER_TEMP/oci-cli-venv"
+          python -m venv "$OCI_VENV"
+          "$OCI_VENV/bin/python" -m pip install \
+            --disable-pip-version-check \
+            --no-cache-dir \
+            "oci-cli==3.83.0" \
+            "urllib3==2.6.3"
+          OCI_BIN="$OCI_VENV/bin/oci"
+          OCI_CLI_VERSION=$("$OCI_BIN" --version 2>&1 | tr '\n' ' ')
 
           mkdir -p "$HOME/.oci"
           printf '%s\n' "$OCI_CLI_KEY_CONTENT" > "$HOME/.oci/oci_api_key.pem"
@@ -142,10 +145,11 @@ jobs:
           PARSE_ERROR_FILE=$(mktemp)
 
           set +e
-          oci compute instance list \
+          "$OCI_BIN" compute instance list \
             --compartment-id "$COMPARTMENT_ID" \
             --display-name "$INSTANCE_NAME" \
-            --all >"$LIST_OUTPUT_FILE" 2>"$LIST_ERROR_FILE"
+            --all \
+            --output json >"$LIST_OUTPUT_FILE" 2>"$LIST_ERROR_FILE"
           LIST_EXIT_CODE=$?
           set -e
 
@@ -162,14 +166,14 @@ jobs:
           if [ -z "${LIST_OUTPUT//[[:space:]]/}" ]; then
             truncated_log=$(printf '%s' "$LIST_ERROR" | tail -c 3000)
             finish "error" "0xdc3545" "❌ OCI returned an empty instance list" \
-              "The list command exited successfully but returned no JSON. OCI stderr: ${truncated_log:-none}"
+              "OCI CLI: $OCI_CLI_VERSION; the list command exited successfully but returned no JSON. OCI stderr: ${truncated_log:-none}"
             exit 1
           fi
 
           set +e
           EXISTING_INSTANCE_ID=$(
             printf '%s' "$LIST_OUTPUT" |
-              python -c 'import json, sys; instances = json.load(sys.stdin).get("data", []); print(next((item.get("id", "") for item in instances if item.get("lifecycle-state") != "TERMINATED"), ""))' \
+              "$OCI_VENV/bin/python" -c 'import json, sys; instances = json.load(sys.stdin).get("data", []); print(next((item.get("id", "") for item in instances if item.get("lifecycle-state") != "TERMINATED"), ""))' \
                 2>"$PARSE_ERROR_FILE"
           )
           PARSE_EXIT_CODE=$?
@@ -196,7 +200,7 @@ jobs:
           OCI_ERROR_FILE=$(mktemp)
 
           set +e
-          oci compute instance launch \
+          "$OCI_BIN" compute instance launch \
             --compartment-id "$COMPARTMENT_ID" \
             --availability-domain "$AD_NAME" \
             --shape "VM.Standard.A1.Flex" \
@@ -206,7 +210,8 @@ jobs:
             --ssh-authorized-keys-file "/tmp/ssh_key.pub" \
             --assign-public-ip true \
             --display-name "$INSTANCE_NAME" \
-            --boot-volume-size-in-gbs 100 >"$OCI_OUTPUT_FILE" 2>"$OCI_ERROR_FILE"
+            --boot-volume-size-in-gbs 100 \
+            --output json >"$OCI_OUTPUT_FILE" 2>"$OCI_ERROR_FILE"
           OCI_EXIT_CODE=$?
           set -e
 
