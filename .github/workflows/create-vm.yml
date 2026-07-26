@@ -53,6 +53,8 @@ jobs:
         run: |
           set -uo pipefail
 
+          outputs_written=false
+
           set_output() {
             printf '%s=%s\n' "$1" "$2" >> "$GITHUB_OUTPUT"
           }
@@ -60,7 +62,8 @@ jobs:
           set_multiline_output() {
             local name="$1"
             local value="$2"
-            local delimiter="ghadelimiter_${RANDOM}_$(date +%s)"
+            local delimiter
+            delimiter="ghadelimiter_${RANDOM}_$(date +%s)"
             {
               printf '%s<<%s\n' "$name" "$delimiter"
               printf '%s\n' "$value"
@@ -73,7 +76,22 @@ jobs:
             set_output "color" "$2"
             set_output "summary" "$3"
             set_multiline_output "log_data" "$4"
+            outputs_written=true
           }
+
+          # shellcheck disable=SC2329  # Invoked indirectly by the EXIT trap.
+          on_exit() {
+            local exit_code=$?
+            trap - EXIT
+            if [ "$outputs_written" != "true" ]; then
+              set +e
+              finish "error" "0xdc3545" \
+                "❌ Workflow stopped unexpectedly" \
+                "The create step exited with code $exit_code before a classified result was produced."
+            fi
+            exit "$exit_code"
+          }
+          trap on_exit EXIT
 
           required_vars=(
             COMPARTMENT_ID
@@ -119,25 +137,51 @@ jobs:
 
           # Prevent duplicate creation when a non-terminated instance with the
           # configured display name already exists.
+          LIST_OUTPUT_FILE=$(mktemp)
+          LIST_ERROR_FILE=$(mktemp)
+          PARSE_ERROR_FILE=$(mktemp)
+
           set +e
-          LIST_OUTPUT=$(oci compute instance list \
+          oci compute instance list \
             --compartment-id "$COMPARTMENT_ID" \
             --display-name "$INSTANCE_NAME" \
-            --all 2>&1)
+            --all >"$LIST_OUTPUT_FILE" 2>"$LIST_ERROR_FILE"
           LIST_EXIT_CODE=$?
           set -e
 
+          LIST_OUTPUT=$(cat "$LIST_OUTPUT_FILE")
+          LIST_ERROR=$(cat "$LIST_ERROR_FILE")
+
           if [ "$LIST_EXIT_CODE" -ne 0 ]; then
-            truncated_log=$(printf '%s' "$LIST_OUTPUT" | tail -c 3000)
+            truncated_log=$(printf '%s' "$LIST_ERROR" | tail -c 3000)
             finish "error" "0xdc3545" "❌ Could not check existing instances" \
               "OCI exit code: $LIST_EXIT_CODE; $truncated_log"
             exit 1
           fi
 
+          if [ -z "${LIST_OUTPUT//[[:space:]]/}" ]; then
+            truncated_log=$(printf '%s' "$LIST_ERROR" | tail -c 3000)
+            finish "error" "0xdc3545" "❌ OCI returned an empty instance list" \
+              "The list command exited successfully but returned no JSON. OCI stderr: ${truncated_log:-none}"
+            exit 1
+          fi
+
+          set +e
           EXISTING_INSTANCE_ID=$(
             printf '%s' "$LIST_OUTPUT" |
-              python -c 'import json, sys; instances = json.load(sys.stdin).get("data", []); print(next((item.get("id", "") for item in instances if item.get("lifecycle-state") != "TERMINATED"), ""))'
+              python -c 'import json, sys; instances = json.load(sys.stdin).get("data", []); print(next((item.get("id", "") for item in instances if item.get("lifecycle-state") != "TERMINATED"), ""))' \
+                2>"$PARSE_ERROR_FILE"
           )
+          PARSE_EXIT_CODE=$?
+          set -e
+
+          if [ "$PARSE_EXIT_CODE" -ne 0 ]; then
+            PARSE_ERROR=$(cat "$PARSE_ERROR_FILE")
+            truncated_log=$(printf '%s' "$LIST_OUTPUT" | tail -c 2000)
+            finish "error" "0xdc3545" "❌ Could not parse OCI instance list" \
+              "Parser exit code: $PARSE_EXIT_CODE; ${PARSE_ERROR:-unknown parser error}; OCI stdout: $truncated_log"
+            exit 1
+          fi
 
           if [ -n "$EXISTING_INSTANCE_ID" ]; then
             finish "already_exists" "0x28a745" \
@@ -146,9 +190,13 @@ jobs:
             exit 0
           fi
 
-          # Capture both OCI output and its real exit code for classification.
+          # Capture stdout, stderr, and the real OCI exit code separately so
+          # warnings cannot corrupt the JSON used for success detection.
+          OCI_OUTPUT_FILE=$(mktemp)
+          OCI_ERROR_FILE=$(mktemp)
+
           set +e
-          OCI_OUTPUT=$(oci compute instance launch \
+          oci compute instance launch \
             --compartment-id "$COMPARTMENT_ID" \
             --availability-domain "$AD_NAME" \
             --shape "VM.Standard.A1.Flex" \
@@ -158,11 +206,14 @@ jobs:
             --ssh-authorized-keys-file "/tmp/ssh_key.pub" \
             --assign-public-ip true \
             --display-name "$INSTANCE_NAME" \
-            --boot-volume-size-in-gbs 100 2>&1)
+            --boot-volume-size-in-gbs 100 >"$OCI_OUTPUT_FILE" 2>"$OCI_ERROR_FILE"
           OCI_EXIT_CODE=$?
           set -e
 
-          truncated_log=$(printf '%s' "$OCI_OUTPUT" | tail -c 3000)
+          OCI_OUTPUT=$(cat "$OCI_OUTPUT_FILE")
+          OCI_ERROR=$(cat "$OCI_ERROR_FILE")
+          OCI_LOG="${OCI_ERROR}${OCI_ERROR:+$'\n'}${OCI_OUTPUT}"
+          truncated_log=$(printf '%s' "$OCI_LOG" | tail -c 3000)
 
           if [ "$OCI_EXIT_CODE" -eq 0 ] &&
              printf '%s' "$OCI_OUTPUT" | grep -q '"lifecycle-state": "PROVISIONING"'; then
@@ -170,7 +221,7 @@ jobs:
               "🚀 VM created; duplicate protection is now active" \
               "OCI exit code: $OCI_EXIT_CODE; $truncated_log"
             exit 0
-          elif printf '%s' "$OCI_OUTPUT" | grep -qi 'Out of host capacity'; then
+          elif printf '%s' "$OCI_LOG" | grep -qi 'Out of host capacity'; then
             finish "capacity_wait" "0xffa500" \
               "⏳ Waiting for Oracle capacity; the next scheduled run will retry" \
               "OCI exit code: $OCI_EXIT_CODE; $truncated_log"
@@ -187,7 +238,7 @@ jobs:
         uses: sarisia/actions-status-discord@v1.15.4
         with:
           webhook: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          status: ${{ steps.create_vm.outputs.result == 'error' && 'Failure' || 'Success' }}
+          status: ${{ (steps.create_vm.outputs.result == 'created' || steps.create_vm.outputs.result == 'already_exists' || steps.create_vm.outputs.result == 'capacity_wait') && 'Success' || 'Failure' }}
           color: ${{ steps.create_vm.outputs.color || '0xdc3545' }}
           title: "OCI Bot Status"
           description: |
