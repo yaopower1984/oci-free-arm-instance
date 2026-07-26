@@ -130,8 +130,7 @@ jobs:
           if [ "$LIST_EXIT_CODE" -ne 0 ]; then
             truncated_log=$(printf '%s' "$LIST_OUTPUT" | tail -c 3000)
             finish "error" "0xdc3545" "❌ Could not check existing instances" \
-              "OCI exit code: $LIST_EXIT_CODE
-$truncated_log"
+              "OCI exit code: $LIST_EXIT_CODE; $truncated_log"
             exit 1
           fi
 
@@ -169,20 +168,17 @@ $truncated_log"
              printf '%s' "$OCI_OUTPUT" | grep -q '"lifecycle-state": "PROVISIONING"'; then
             finish "created" "0x28a745" \
               "🚀 VM created; duplicate protection is now active" \
-              "OCI exit code: $OCI_EXIT_CODE
-$truncated_log"
+              "OCI exit code: $OCI_EXIT_CODE; $truncated_log"
             exit 0
           elif printf '%s' "$OCI_OUTPUT" | grep -qi 'Out of host capacity'; then
             finish "capacity_wait" "0xffa500" \
               "⏳ Waiting for Oracle capacity; the next scheduled run will retry" \
-              "OCI exit code: $OCI_EXIT_CODE
-$truncated_log"
+              "OCI exit code: $OCI_EXIT_CODE; $truncated_log"
             exit 0
           else
             finish "error" "0xdc3545" \
               "❌ OCI returned an unexpected error" \
-              "OCI exit code: $OCI_EXIT_CODE
-$truncated_log"
+              "OCI exit code: $OCI_EXIT_CODE; $truncated_log"
             exit 1
           fi
 
