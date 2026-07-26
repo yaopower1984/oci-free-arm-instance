@@ -138,52 +138,45 @@ jobs:
           printf '%s\n' "$SSH_PUBLIC_KEY" > /tmp/ssh_key.pub
           chmod 600 /tmp/ssh_key.pub
 
-          # Prevent duplicate creation when a non-terminated instance with the
-          # configured display name already exists.
+          # Prevent duplicate creation by querying through the OCI Python SDK.
+          # This bypasses the OCI CLI renderer, which can exit successfully
+          # while producing an empty stdout stream.
           LIST_OUTPUT_FILE=$(mktemp)
           LIST_ERROR_FILE=$(mktemp)
-          PARSE_ERROR_FILE=$(mktemp)
 
           set +e
-          "$OCI_BIN" compute instance list \
-            --compartment-id "$COMPARTMENT_ID" \
-            --display-name "$INSTANCE_NAME" \
-            --all \
-            --output json >"$LIST_OUTPUT_FILE" 2>"$LIST_ERROR_FILE"
+          "$OCI_VENV/bin/python" - <<'PY' >"$LIST_OUTPUT_FILE" 2>"$LIST_ERROR_FILE"
+          import os
+
+          import oci
+
+          config = oci.config.from_file()
+          compute_client = oci.core.ComputeClient(config)
+          response = oci.pagination.list_call_get_all_results(
+              compute_client.list_instances,
+              compartment_id=os.environ["COMPARTMENT_ID"],
+              display_name=os.environ["INSTANCE_NAME"],
+          )
+          existing_instance_id = next(
+              (
+                  instance.id
+                  for instance in response.data
+                  if instance.lifecycle_state != "TERMINATED"
+              ),
+              "",
+          )
+          print(existing_instance_id)
+          PY
           LIST_EXIT_CODE=$?
           set -e
 
-          LIST_OUTPUT=$(cat "$LIST_OUTPUT_FILE")
           LIST_ERROR=$(cat "$LIST_ERROR_FILE")
+          EXISTING_INSTANCE_ID=$(tr -d '\r\n' < "$LIST_OUTPUT_FILE")
 
           if [ "$LIST_EXIT_CODE" -ne 0 ]; then
             truncated_log=$(printf '%s' "$LIST_ERROR" | tail -c 3000)
             finish "error" "0xdc3545" "❌ Could not check existing instances" \
-              "OCI exit code: $LIST_EXIT_CODE; $truncated_log"
-            exit 1
-          fi
-
-          if [ -z "${LIST_OUTPUT//[[:space:]]/}" ]; then
-            truncated_log=$(printf '%s' "$LIST_ERROR" | tail -c 3000)
-            finish "error" "0xdc3545" "❌ OCI returned an empty instance list" \
-              "OCI CLI: $OCI_CLI_VERSION; the list command exited successfully but returned no JSON. OCI stderr: ${truncated_log:-none}"
-            exit 1
-          fi
-
-          set +e
-          EXISTING_INSTANCE_ID=$(
-            printf '%s' "$LIST_OUTPUT" |
-              "$OCI_VENV/bin/python" -c 'import json, sys; instances = json.load(sys.stdin).get("data", []); print(next((item.get("id", "") for item in instances if item.get("lifecycle-state") != "TERMINATED"), ""))' \
-                2>"$PARSE_ERROR_FILE"
-          )
-          PARSE_EXIT_CODE=$?
-          set -e
-
-          if [ "$PARSE_EXIT_CODE" -ne 0 ]; then
-            PARSE_ERROR=$(cat "$PARSE_ERROR_FILE")
-            truncated_log=$(printf '%s' "$LIST_OUTPUT" | tail -c 2000)
-            finish "error" "0xdc3545" "❌ Could not parse OCI instance list" \
-              "Parser exit code: $PARSE_EXIT_CODE; ${PARSE_ERROR:-unknown parser error}; OCI stdout: $truncated_log"
+              "OCI SDK exit code: $LIST_EXIT_CODE; ${truncated_log:-no diagnostic output}"
             exit 1
           fi
 
