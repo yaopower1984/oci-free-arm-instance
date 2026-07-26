@@ -1,31 +1,33 @@
 name: Try to Create OCI VM
-# Runs every 10 minutes
+
 on:
   schedule:
     - cron: "*/10 * * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: oci-vm-creator
+  cancel-in-progress: false
+
 env:
-  # 1. Suppress warnings to keep logs clean
   SUPPRESS_LABEL_WARNING: true
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
-  # 2. Mumbai Configuration (Verified)
+  # Phoenix configuration
   OCI_CLI_REGION: "us-phoenix-1"
   AD_NAME: "ULyM:PHX-AD-3"
   IMAGE_ID: "ocid1.image.oc1.phx.aaaaaaaad2gf5wfcfwu4npq4krn2mojhb4usegjtlwkcyee2oq32qu3x45ta"
   SUBNET_ID: "ocid1.subnet.oc1.phx.aaaaaaaafqectyateqrfoe2kc7fm3yn4hn4crnyjwxpxhwrqb46az6vg7ota"
-
-  # 3. Secrets
-  COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
-  OCI_CLI_USER: ${{ secrets.OCI_CLI_USER }}
-  OCI_CLI_TENANCY: ${{ secrets.OCI_CLI_TENANCY }}
-  OCI_CLI_FINGERPRINT: ${{ secrets.OCI_CLI_FINGERPRINT }}
-  OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CLI_KEY_CONTENT }}
+  INSTANCE_NAME: "coolify-vm"
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+
     steps:
       - name: Cache pip packages
         id: cache-pip
@@ -35,37 +37,119 @@ jobs:
           key: ${{ runner.os }}-pip-oci-cli-v1
 
       - name: Add OCI CLI to path
-        run: echo "$HOME/.local/bin" >> $GITHUB_PATH
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Setup OCI CLI and Try to Create VM
+      - name: Setup OCI CLI and try to create VM
         id: create_vm
-        continue-on-error: true 
+        continue-on-error: true
+        env:
+          COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
+          OCI_CLI_USER: ${{ secrets.OCI_CLI_USER }}
+          OCI_CLI_TENANCY: ${{ secrets.OCI_CLI_TENANCY }}
+          OCI_CLI_FINGERPRINT: ${{ secrets.OCI_CLI_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CLI_KEY_CONTENT }}
+          SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          set -o pipefail
+          set -uo pipefail
 
-          # Install OCI CLI
-          pip install oci-cli
+          set_output() {
+            printf '%s=%s\n' "$1" "$2" >> "$GITHUB_OUTPUT"
+          }
 
-          # Create Directory
-          mkdir -p /home/runner/.oci
+          set_multiline_output() {
+            local name="$1"
+            local value="$2"
+            local delimiter="ghadelimiter_${RANDOM}_$(date +%s)"
+            {
+              printf '%s<<%s\n' "$name" "$delimiter"
+              printf '%s\n' "$value"
+              printf '%s\n' "$delimiter"
+            } >> "$GITHUB_OUTPUT"
+          }
 
-          # Write Key File
-          echo "${{ secrets.OCI_CLI_KEY_CONTENT }}" > /home/runner/.oci/oci_api_key.pem
-          chmod 600 /home/runner/.oci/oci_api_key.pem
+          finish() {
+            set_output "result" "$1"
+            set_output "color" "$2"
+            set_output "summary" "$3"
+            set_multiline_output "log_data" "$4"
+          }
 
-          # Write Config File (Absolute Paths)
-          echo "[DEFAULT]" > /home/runner/.oci/config
-          echo "user=${{ secrets.OCI_CLI_USER }}" >> /home/runner/.oci/config
-          echo "tenancy=${{ secrets.OCI_CLI_TENANCY }}" >> /home/runner/.oci/config
-          echo "fingerprint=${{ secrets.OCI_CLI_FINGERPRINT }}" >> /home/runner/.oci/config
-          echo "key_file=/home/runner/.oci/oci_api_key.pem" >> /home/runner/.oci/config
-          echo "region=${{ env.OCI_CLI_REGION }}" >> /home/runner/.oci/config
-          
-          # Write SSH Key
-          echo "${{ secrets.SSH_PUBLIC_KEY }}" > /tmp/ssh_key.pub
+          required_vars=(
+            COMPARTMENT_ID
+            OCI_CLI_USER
+            OCI_CLI_TENANCY
+            OCI_CLI_FINGERPRINT
+            OCI_CLI_KEY_CONTENT
+            SSH_PUBLIC_KEY
+            DISCORD_WEBHOOK_URL
+          )
+          missing_vars=()
+          for variable_name in "${required_vars[@]}"; do
+            if [ -z "${!variable_name:-}" ]; then
+              missing_vars+=("$variable_name")
+            fi
+          done
 
-          # Launch VM
-          oci compute instance launch \
+          if [ "${#missing_vars[@]}" -gt 0 ]; then
+            missing_message="Missing required GitHub Secrets: ${missing_vars[*]}"
+            echo "::error::$missing_message"
+            finish "error" "0xdc3545" "❌ Configuration error" "$missing_message"
+            exit 1
+          fi
+
+          python -m pip install --user oci-cli
+
+          mkdir -p "$HOME/.oci"
+          printf '%s\n' "$OCI_CLI_KEY_CONTENT" > "$HOME/.oci/oci_api_key.pem"
+          chmod 600 "$HOME/.oci/oci_api_key.pem"
+
+          {
+            echo "[DEFAULT]"
+            echo "user=$OCI_CLI_USER"
+            echo "tenancy=$OCI_CLI_TENANCY"
+            echo "fingerprint=$OCI_CLI_FINGERPRINT"
+            echo "key_file=$HOME/.oci/oci_api_key.pem"
+            echo "region=$OCI_CLI_REGION"
+          } > "$HOME/.oci/config"
+          chmod 600 "$HOME/.oci/config"
+
+          printf '%s\n' "$SSH_PUBLIC_KEY" > /tmp/ssh_key.pub
+          chmod 600 /tmp/ssh_key.pub
+
+          # Prevent duplicate creation when a non-terminated instance with the
+          # configured display name already exists.
+          set +e
+          LIST_OUTPUT=$(oci compute instance list \
+            --compartment-id "$COMPARTMENT_ID" \
+            --display-name "$INSTANCE_NAME" \
+            --all 2>&1)
+          LIST_EXIT_CODE=$?
+          set -e
+
+          if [ "$LIST_EXIT_CODE" -ne 0 ]; then
+            truncated_log=$(printf '%s' "$LIST_OUTPUT" | tail -c 3000)
+            finish "error" "0xdc3545" "❌ Could not check existing instances" \
+              "OCI exit code: $LIST_EXIT_CODE
+$truncated_log"
+            exit 1
+          fi
+
+          EXISTING_INSTANCE_ID=$(
+            printf '%s' "$LIST_OUTPUT" |
+              python -c 'import json, sys; instances = json.load(sys.stdin).get("data", []); print(next((item.get("id", "") for item in instances if item.get("lifecycle-state") != "TERMINATED"), ""))'
+          )
+
+          if [ -n "$EXISTING_INSTANCE_ID" ]; then
+            finish "already_exists" "0x28a745" \
+              "🛡️ Existing instance detected; creation skipped" \
+              "A non-terminated instance named $INSTANCE_NAME already exists."
+            exit 0
+          fi
+
+          # Capture both OCI output and its real exit code for classification.
+          set +e
+          OCI_OUTPUT=$(oci compute instance launch \
             --compartment-id "$COMPARTMENT_ID" \
             --availability-domain "$AD_NAME" \
             --shape "VM.Standard.A1.Flex" \
@@ -74,40 +158,51 @@ jobs:
             --image-id "$IMAGE_ID" \
             --ssh-authorized-keys-file "/tmp/ssh_key.pub" \
             --assign-public-ip true \
-            --display-name "coolify-vm" \
-            --boot-volume-size-in-gbs 100
+            --display-name "$INSTANCE_NAME" \
+            --boot-volume-size-in-gbs 100 2>&1)
+          OCI_EXIT_CODE=$?
+          set -e
 
-          # Store Log for Discord
-          echo "log_data<<EOF" >> $GITHUB_OUTPUT
-          echo "$OCI_OUTPUT" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          truncated_log=$(printf '%s' "$OCI_OUTPUT" | tail -c 3000)
 
-          # --- SMART CHECK LOGIC ---
-          if echo "$OCI_OUTPUT" | grep -q '"lifecycle-state": "PROVISIONING"'; then
-            echo "✅ VICTORY! VM is being created."
+          if [ "$OCI_EXIT_CODE" -eq 0 ] &&
+             printf '%s' "$OCI_OUTPUT" | grep -q '"lifecycle-state": "PROVISIONING"'; then
+            finish "created" "0x28a745" \
+              "🚀 VM created; duplicate protection is now active" \
+              "OCI exit code: $OCI_EXIT_CODE
+$truncated_log"
             exit 0
-          elif echo "$OCI_OUTPUT" | grep -q 'Out of host capacity'; then
-            echo "⚠️  Oracle is full (Capacity Error). This is expected. Retrying next time..."
-            # We exit with 0 so GitHub does not disable the cron schedule
+          elif printf '%s' "$OCI_OUTPUT" | grep -qi 'Out of host capacity'; then
+            finish "capacity_wait" "0xffa500" \
+              "⏳ Waiting for Oracle capacity; the next scheduled run will retry" \
+              "OCI exit code: $OCI_EXIT_CODE
+$truncated_log"
             exit 0
           else
-            echo "❌ Real Error Detected. Failing the workflow."
+            finish "error" "0xdc3545" \
+              "❌ OCI returned an unexpected error" \
+              "OCI exit code: $OCI_EXIT_CODE
+$truncated_log"
             exit 1
           fi
 
-      - name: Send Discord Notification
+      - name: Send Discord notification
         if: always()
         uses: sarisia/actions-status-discord@v1.15.4
         with:
           webhook: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          # Set color: Green for Success, Orange for Capacity Wait, Red for Error
-          color: ${{ steps.create_vm.outcome == 'success' && '0x28a745' || '0xdc3545' }}
+          status: ${{ steps.create_vm.outputs.result == 'error' && 'Failure' || 'Success' }}
+          color: ${{ steps.create_vm.outputs.color || '0xdc3545' }}
           title: "OCI Bot Status"
           description: |
             **Result:**
-            ${{ contains(steps.create_vm.outputs.log_data, 'Out of host capacity') && '⏳ Waiting for Capacity...' || contains(steps.create_vm.outputs.log_data, 'PROVISIONING') && '🚀 VM CREATED! DISABLE WORKFLOW!' || '❌ Error' }}
+            ${{ steps.create_vm.outputs.summary || '❌ Workflow stopped before producing a result.' }}
 
             **Details:**
-            ```json
-            ${{ steps.create_vm.outputs.log_data }}
+            ```text
+            ${{ steps.create_vm.outputs.log_data || 'No diagnostic output was captured.' }}
             ```
+
+      - name: Fail workflow on configuration or OCI error
+        if: steps.create_vm.outcome == 'failure' || steps.create_vm.outputs.result == 'error'
+        run: exit 1
